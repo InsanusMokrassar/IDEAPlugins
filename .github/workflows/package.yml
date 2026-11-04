@@ -1,0 +1,141 @@
+name: Package plugin
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not cancel a run between uploading the ZIP and moving its version tag.
+concurrency:
+  group: plugin-release-main
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the triggering commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Test, verify and build the plugin ZIP
+        run: >-
+          ./gradlew --no-daemon --console=plain --max-workers=2
+          '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8'
+          test verifyPluginStructure buildPlugin verifyPlugin
+
+      - name: Read the packaged plugin version
+        id: package
+        run: |
+          python3 - <<'PY'
+          import io
+          import os
+          import re
+          import xml.etree.ElementTree as ET
+          import zipfile
+          from pathlib import Path
+
+          archives = list(Path('build/distributions').glob('*.zip'))
+          if len(archives) != 1:
+              raise SystemExit(f'Expected one plugin ZIP, found {len(archives)}')
+          path = archives[0]
+          versions = []
+          with zipfile.ZipFile(path) as archive:
+              for name in archive.namelist():
+                  if name.endswith('.jar'):
+                      with zipfile.ZipFile(io.BytesIO(archive.read(name))) as jar:
+                          if 'META-INF/plugin.xml' in jar.namelist():
+                              plugin = ET.fromstring(jar.read('META-INF/plugin.xml'))
+                              if plugin.findtext('id') == 'dev.inmo.koin.di.navigation':
+                                  versions.append(plugin.findtext('version', ''))
+          if len(versions) != 1 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._+-]+)?', versions[0]):
+              raise SystemExit(f'Expected one valid plugin version, found {versions!r}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'version={versions[0]}\ntag=v{versions[0]}\nzip={path.as_posix()}\n')
+          PY
+
+      - name: Keep the installable ZIP as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-${{ steps.package.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or replace the version release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLUGIN_VERSION: ${{ steps.package.outputs.version }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          ZIP_PATH: ${{ steps.package.outputs.zip }}
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$current_sha" != "$GITHUB_SHA" ]]; then
+            echo '::notice::Skipping release: this commit is no longer the head of main.'
+            exit 0
+          fi
+
+          find_release() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -c --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag)'
+          }
+          release=$(find_release)
+          if [[ -n "$release" ]] && [[ $(jq -r '.immutable' <<< "$release") == true ]]; then
+            echo '::error::This release is immutable; GitHub does not allow replacing its tag or ZIP.'
+            exit 1
+          fi
+
+          notes="$RUNNER_TEMP/plugin-release-notes.md"
+          printf 'Built from commit %s on main.\n\nBuild: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$notes"
+          if [[ -z "$release" ]]; then
+            gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" \
+              --title "Koin DI Navigation $PLUGIN_VERSION" --notes-file "$notes"
+            release=$(find_release)
+          fi
+          release_id=$(jq -er '.id' <<< "$release")
+
+          # Upload first under a unique name so a failed upload preserves the previous ZIP.
+          asset_name=$(basename "$ZIP_PATH")
+          staged_name="$asset_name.upload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          staged_path="$RUNNER_TEMP/$staged_name"
+          cp -- "$ZIP_PATH" "$staged_path"
+          gh release upload "$RELEASE_TAG" "$staged_path" --clobber
+          assets=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq -s 'add')
+          staged_id=$(jq -er --arg name "$staged_name" --argjson size "$(stat -c %s "$ZIP_PATH")" \
+            '.[] | select(.name == $name and .state == "uploaded" and .size == $size) | .id' <<< "$assets")
+          old_id=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' <<< "$assets")
+          if [[ -n "$old_id" ]]; then
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old_id"
+          fi
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$staged_id" \
+            -f name="$asset_name" --silent
+
+          # --target alone does not move an existing tag. Update this version's tag explicitly.
+          gh auth setup-git
+          git push --force origin "$GITHUB_SHA:refs/tags/$RELEASE_TAG"
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest \
+            --target "$GITHUB_SHA" --title "Koin DI Navigation $PLUGIN_VERSION" --notes-file "$notes"
+          printf 'Published [%s](%s/%s/releases/tag/%s).\n' \
+            "$asset_name" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
