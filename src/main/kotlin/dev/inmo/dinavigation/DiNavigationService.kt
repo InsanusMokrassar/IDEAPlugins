@@ -300,9 +300,12 @@ internal class DiNavigationService(private val project: Project, private val cor
     }
 
     @TestOnly
-    fun refreshForTests() {
+    fun refreshForTests(afterFile: () -> Unit = {}) {
         val plan = prepareRefresh()
-        plan.files.forEach { refreshFile(it, plan) }
+        plan.files.forEach {
+            refreshFile(it, plan)
+            afterFile()
+        }
         check(publish(plan)) { "PSI changed during fixture refresh" }
     }
 

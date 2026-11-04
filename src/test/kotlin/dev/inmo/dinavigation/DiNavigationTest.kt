@@ -5,11 +5,7 @@ package dev.inmo.dinavigation
 import com.intellij.codeInsight.daemon.LineMarkerInfo
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.progress.util.AbstractProgressIndicatorBase
-import com.intellij.openapi.progress.StandardProgressIndicator
-import com.intellij.openapi.progress.impl.CoreProgressManager
 import com.intellij.openapi.progress.ProcessCanceledException
-import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.roots.ModuleRootModificationUtil
 import com.intellij.openapi.vfs.VfsUtil
@@ -514,27 +510,21 @@ class DiNavigationTest : LightJavaCodeInsightFixtureTestCase() {
         }
         PsiDocumentManager.getInstance(project).commitAllDocuments()
         val before = service.analyzedFileCount
-        val indicator = object : AbstractProgressIndicatorBase(), StandardProgressIndicator {
-            override fun isCanceled(): Boolean {
-                if (service.analyzedFileCount >= before + 3) cancel()
-                return super.isCanceled()
-            }
-        }
         try {
             allowAnalysisOnEdt {
-                // IDEA normally samples cancellation checks; force them here so fast, warm runs
-                // interrupt at the same completed-file boundary as a cold run.
-                CoreProgressManager.__testWhileAlwaysCheckingCanceled {
-                    ProgressManager.getInstance().runProcess(Runnable {
-                        ReadAction.run<RuntimeException> { service.refreshForTests() }
-                    }, indicator)
+                // Inject the platform's cancellation at a fixed boundary. ProgressManager polling
+                // depends on the runner/thread context and is not what this cache test verifies.
+                ReadAction.run<RuntimeException> {
+                    service.refreshForTests {
+                        if (service.analyzedFileCount == before + 3) throw ProcessCanceledException()
+                    }
                 }
             }
             fail("Expected cancellation before the complete index was published")
         } catch (_: ProcessCanceledException) { /* Expected: partial file entries remain reusable. */ }
         assertFalse(service.isReady)
         val completed = service.analyzedFileCount - before
-        assertTrue("Some files must survive cancellation", completed in 3..5)
+        assertEquals("Completed files must survive cancellation", 3L, completed)
         smart { assertTrue(service.isReady) }
         assertEquals("Resuming must reuse files completed before cancellation", before + 6, service.analyzedFileCount)
     }

@@ -139,3 +139,15 @@ jobs:
             --target "$GITHUB_SHA" --title "Koin DI Navigation $PLUGIN_VERSION" --notes-file "$notes"
           printf 'Published [%s](%s/%s/releases/tag/%s).\n' \
             "$asset_name" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verification reports on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/reports/tests/test/
+            build/test-results/test/*.xml
+            build/reports/pluginVerifier/
+          if-no-files-found: ignore
+          retention-days: 7
