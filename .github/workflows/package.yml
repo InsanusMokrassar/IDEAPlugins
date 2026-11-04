@@ -110,9 +110,10 @@ jobs:
           printf 'Built from commit %s on main.\n\nBuild: %s/%s/actions/runs/%s\n' \
             "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$notes"
           if [[ -z "$release" ]]; then
-            gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" \
-              --title "Koin DI Navigation $PLUGIN_VERSION" --notes-file "$notes"
-            release=$(find_release)
+            # Use the creation response: the release list can lag behind a newly created draft.
+            release=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$RELEASE_TAG" -f target_commitish="$GITHUB_SHA" \
+              -f name="Koin DI Navigation $PLUGIN_VERSION" -F draft=true -F body=@"$notes")
           fi
           release_id=$(jq -er '.id' <<< "$release")
 
