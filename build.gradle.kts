@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "dev.inmo"
-version = "1.0.2"
+version = "1.0.3"
 
 repositories {
     mavenCentral()
@@ -18,7 +18,7 @@ val fixtureLibraries by configurations.creating
 dependencies {
     intellijPlatform {
         val localIde = providers.gradleProperty("localIdePath").orNull
-        if (localIde != null) local(localIde) else intellijIdea("2026.2.4")
+        if (localIde != null) local(localIde) else intellijIdea("2026.3")
         bundledPlugins("com.intellij.java", "org.jetbrains.kotlin")
         testFramework(TestFrameworkType.Platform)
         testFramework(TestFrameworkType.Plugin.Java)
@@ -34,17 +34,19 @@ intellijPlatform {
     pluginConfiguration {
         name = "Koin DI Navigation"
         ideaVersion {
-            sinceBuild = "262.11879"
-            // Analysis API evolves between IDE branches; only the tested 262 branch is supported.
-            untilBuild = "262.*"
+            sinceBuild = "263.7307"
+            // Analysis API evolves between IDE branches; only the tested 263 branch is supported.
+            untilBuild = "263.*"
         }
     }
     pluginVerification {
         ides { current() }
-        // All required dependencies are bundled. Verify the actual selected IDE, without Marketplace substitution.
-        freeArgs.add("-offline")
     }
 }
+
+// Use the dedicated option so Gradle --offline cannot duplicate a CLI flag.
+// All required dependencies are bundled with the selected IDE.
+tasks.verifyPlugin { offline.set(true) }
 
 tasks.test {
     maxHeapSize = "3g"

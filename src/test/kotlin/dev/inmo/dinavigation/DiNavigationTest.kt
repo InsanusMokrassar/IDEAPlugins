@@ -315,6 +315,151 @@ class DiNavigationTest : LightJavaCodeInsightFixtureTestCase() {
         }
     }
 
+    fun testWidenedFunctionAndPropertyWrappersKeepDelegateType() {
+        add("WrapperTypes.kt", """
+            package sample
+            interface Api
+            class Service : Api
+            class Other : Api
+        """)
+        add("WidenedWrappers.kt", """
+            package sample
+            import org.koin.core.Koin
+            fun Koin.obtain(): Api = get<Service>()
+            val Koin.serviceAsApi: Api get() = get<Service>()
+            inline fun <reified Bean : Api> Koin.generic(): Api = get<Bean>()
+            inline fun <reified Value : Api> Koin.forward(): Any = generic<Value>()
+            fun Koin.allAsCollection(): Collection<Api> = getAll<Service>()
+        """)
+        val definitions = add("WrapperDefinitions.kt", """
+            package sample
+            import org.koin.dsl.module
+            val bindings = module {
+                single { Service() }
+                single<Api> { Other() }
+            }
+        """)
+        val calls = add("WrapperCalls.kt", """
+            package sample
+            import org.koin.core.Koin
+            import sample.forward as forwarded
+            fun use(koin: Koin) {
+                koin.obtain()
+                koin.serviceAsApi
+                koin.forwarded<Service>()
+                koin.allAsCollection()
+            }
+        """)
+        smart {
+            val correct = service.sites(definitions).single { it.call.types == setOf("sample.Service") }
+            val usages = service.sites(calls)
+            assertEquals(4, usages.size)
+            usages.forEach {
+                assertEquals(it.presentation(), setOf("sample.Service"), it.call.types)
+                assertEquals(correct.anchor, service.targets(it).single().anchor)
+                assertTrue(service.targets(correct).any { target -> target.anchor == it.anchor })
+            }
+        }
+    }
+
+    fun testTransitiveDefinitionWrappersPreserveTypeThroughErasedReturn() {
+        add("TransitiveWrappers.kt", """
+            package wrappers
+            import org.koin.core.module.Module
+            import org.koin.core.definition.Definition
+            import org.koin.core.definition.KoinDefinition
+            import dev.inmo.micro_utils.koin.singleWithBinds
+            inline fun <reified Bean : Any> Module.register(noinline definition: Definition<Bean>): KoinDefinition<*> =
+                singleWithBinds(definition = definition)
+            inline fun <reified Value : Any> Module.forward(noinline make: Definition<Value>): KoinDefinition<*> =
+                register(definition = make)
+            inline fun <reified Item : Any> Module.plain(noinline make: Definition<Item>): KoinDefinition<*> =
+                single(definition = make)
+        """)
+        val file = add("TransitiveCalls.kt", """
+            package sample
+            import org.koin.core.Koin
+            import org.koin.dsl.module
+            import wrappers.forward as registerBean
+            import wrappers.plain
+            interface Api
+            class Service : Api
+            class Other
+            val bindings = module { registerBean { Service() }; plain { Other() } }
+            fun use(koin: Koin) { koin.get<Service>(); koin.get<Api>(); koin.get<Other>() }
+        """)
+        smart {
+            val sites = service.sites(file)
+            assertEquals(5, sites.size)
+            val extension = sites.single { it.pointer.element?.text == "registerBean { Service() }" }
+            assertTrue(extension.call.types.containsAll(setOf("sample.Service", "sample.Api")))
+            assertEquals(2, service.targets(extension).size)
+            val plain = sites.single { it.pointer.element?.text == "plain { Other() }" }
+            assertEquals(setOf("sample.Other"), plain.call.types)
+            assertEquals(1, service.targets(plain).size)
+        }
+    }
+
+    fun testMemberWrappersSubstituteReceiverTypesIncludingInheritance() {
+        add("Provider.kt", """
+            package sample
+            import org.koin.core.Koin
+            import kotlin.reflect.KClass
+            interface Api
+            class Service : Api
+            class Other : Api
+            open class Provider<Bean : Api>(private val koin: Koin, private val kind: KClass<Bean>) {
+                fun obtain(): Bean = koin.get<Bean>(clazz = kind)
+                val current: Bean get() = koin.get<Bean>(clazz = kind)
+                fun widened(): Api = koin.get<Bean>(clazz = kind)
+            }
+            class ServiceProvider(koin: Koin) : Provider<Service>(koin, Service::class)
+        """)
+        val definitions = add("ProviderDefinitions.kt", """
+            package sample
+            import org.koin.dsl.module
+            val bindings = module { single { Service() }; single<Api> { Other() } }
+        """)
+        val uses = add("ProviderUses.kt", """
+            package sample
+            fun use(provider: Provider<Service>, inherited: ServiceProvider) {
+                provider.obtain()
+                provider.current
+                provider.widened()
+                inherited.obtain()
+                inherited.current
+                inherited.widened()
+            }
+        """)
+        smart {
+            val correct = service.sites(definitions).single { it.call.types == setOf("sample.Service") }
+            val sites = service.sites(uses)
+            assertEquals(6, sites.size)
+            sites.forEach {
+                assertEquals(it.presentation(), setOf("sample.Service"), it.call.types)
+                assertEquals(correct.anchor, service.targets(it).single().anchor)
+            }
+        }
+    }
+
+    fun testTooltipEscapesGenericTypesButAccessibilityUsesPlainText() {
+        val file = add("Tooltip.kt", """
+            package sample
+            import org.koin.core.Koin
+            fun use(koin: Koin): List<String> = koin.get<List<String>>()
+        """)
+        smart {
+            val site = service.sites(file).single()
+            val marker = DiLineMarkerProvider().marker(site.anchor!!, site)
+            val pane = com.intellij.codeInsight.hint.LineTooltipRenderer.createEditorPane(
+                marker.lineMarkerTooltip!!, com.intellij.ui.HintHint(), javax.swing.JLayeredPane(), false,
+            )
+            val text = pane.document.getText(0, pane.document.length)
+            assertTrue(text, text.contains("List<String>"))
+            assertEquals("Find Koin definitions: List<String>", marker.createGutterRenderer()!!.accessibleName)
+        }
+    }
+
     fun testDefinitionWrapperRetainsConstructorOptionsAndBindings() {
         val file = add("WrappedOptions.kt", """
             package sample

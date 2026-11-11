@@ -4,8 +4,8 @@
     <vendor>InMo</vendor>
     <description><![CDATA[
         Navigate between Kotlin Koin definitions and injection calls from the editor gutter.
-        Supports MicroUtils StartupLauncher / StartPlugin, binding aliases, qualifiers,
-        inferred types and direct forwarding wrappers. Uses Kotlin K2 analysis.
+        Supports binding aliases, qualifiers, inferred types and direct forwarding wrappers.
+        Uses Kotlin K2 analysis.
     ]]></description>
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.java</depends>

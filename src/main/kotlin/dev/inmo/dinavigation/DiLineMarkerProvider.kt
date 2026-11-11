@@ -12,6 +12,7 @@ import com.intellij.openapi.util.IconLoader
 import com.intellij.psi.PsiElement
 import com.intellij.ui.SimpleListCellRenderer
 import com.intellij.ui.awt.RelativePoint
+import com.intellij.xml.util.XmlStringUtil
 import org.jetbrains.kotlin.psi.KtFile
 import java.awt.event.MouseEvent
 import javax.swing.JList
@@ -41,10 +42,11 @@ class DiLineMarkerProvider : LineMarkerProviderDescriptor() {
     internal fun marker(anchor: PsiElement, site: DiSite): LineMarkerInfo<PsiElement> {
         val definition = site.call.kind == DiKind.DEFINITION
         val direction = if (definition) "Find Koin usages" else "Find Koin definitions"
-        val tooltip = "$direction: ${site.call.displayType}"
+        val accessibleName = "$direction: ${site.call.displayType}"
+        val tooltip = XmlStringUtil.escapeString(accessibleName)
         return LineMarkerInfo(anchor, anchor.textRange, if (definition) DiIcons.DEFINITION else DiIcons.LOOKUP,
             { tooltip }, GutterIconNavigationHandler { event, _ -> navigate(event, site) },
-            GutterIconRenderer.Alignment.LEFT, { tooltip })
+            GutterIconRenderer.Alignment.LEFT, { accessibleName })
     }
 
     private fun navigate(event: MouseEvent, site: DiSite) {

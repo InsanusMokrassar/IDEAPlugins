@@ -6,49 +6,58 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.kotlin.analysis.api.KaSession
-import org.jetbrains.kotlin.analysis.api.analyze
+import org.jetbrains.kotlin.analysis.api.session.analyze
 import org.jetbrains.kotlin.analysis.api.resolution.KaFunctionCall
+import org.jetbrains.kotlin.analysis.api.resolution.KaSimpleCall
 import org.jetbrains.kotlin.analysis.api.symbols.*
 import org.jetbrains.kotlin.analysis.api.types.*
 import org.jetbrains.kotlin.psi.*
 
-/** Only plain strings and data classes leave an Analysis API session. */
+/** Cached results are detached values; wrapper type pointers stay local to one resolution. */
 internal class DiResolver(private val recordDependency: (PsiElement) -> Unit = {}) {
     fun resolve(expression: KtExpression): DiCall? = analyze(expression) {
-        ProgressManager.checkCanceled()
-        when (expression) {
-            is KtCallExpression -> {
-                val resolved = expression.resolveCall() ?: return@analyze null
-                val spec = specFor(resolved.signature.symbol, 0) ?: return@analyze null
-                val type = beanType(resolved, spec.operation) ?: return@analyze null
-                val primary = classKey(type) ?: return@analyze null
-                val types = linkedSetOf(primary)
-                var qualifier = instantiate(spec.qualifier, resolved).valueOrDynamic(expression)
-                if (spec.operation.kind == DiKind.DEFINITION) {
-                    types.addAll(spec.boundTypes)
-                    if (spec.operation.autoBinds && resolved.argument("bindFilter") == null) {
-                        type.allSupertypes.mapNotNullTo(types) { classKey(it) }
+        with(contextOf<KaSession>()) {
+            ProgressManager.checkCanceled()
+            when (expression) {
+                is KtCallExpression -> {
+                    val resolved = expression.resolveCall() ?: return@analyze null
+                    val spec = specFor(resolved.signature.symbol, 0) ?: return@analyze null
+                    val type = beanType(resolved, spec) ?: return@analyze null
+                    val primary = classKey(type) ?: return@analyze null
+                    val types = linkedSetOf(primary)
+                    var qualifier = instantiate(spec.qualifier, resolved).valueOrDynamic(expression)
+                    if (spec.operation.kind == DiKind.DEFINITION) {
+                        types.addAll(spec.boundTypes)
+                        if (spec.operation.supertypeBindingFilter?.let { resolved.argument(it) == null } == true) {
+                            type.allSupertypes.mapNotNullTo(types) { classKey(it) }
+                        }
+                        val decorations = definitionDecorations(expression, resolved)
+                        types.addAll(decorations.types)
+                        decorations.qualifier?.let { qualifier = it.valueOrDynamic(expression) }
                     }
-                    val decorations = definitionDecorations(expression, resolved)
-                    types.addAll(decorations.types)
-                    decorations.qualifier?.let { qualifier = it.valueOrDynamic(expression) }
+                    DiCall(spec.operation.kind, types, qualifier, displayName(type))
                 }
-                DiCall(spec.operation.kind, types, qualifier, displayName(type))
+                is KtNameReferenceExpression -> {
+                    val resolved = expression.resolveCall() ?: return@analyze null
+                    val symbol = resolved.signature.symbol as? KaPropertySymbol ?: return@analyze null
+                    val spec = specFor(symbol, 0) ?: return@analyze null
+                    if (spec.operation.kind != DiKind.LOOKUP) return@analyze null
+                    val type = beanType(resolved, spec) ?: return@analyze null
+                    val primary = classKey(type) ?: return@analyze null
+                    DiCall(DiKind.LOOKUP, setOf(primary), spec.qualifier.valueOrDynamic(expression), displayName(type))
+                }
+                else -> null
             }
-            is KtNameReferenceExpression -> {
-                val resolved = expression.resolveCall() ?: return@analyze null
-                val symbol = resolved.signature.symbol as? KaPropertySymbol ?: return@analyze null
-                val spec = specFor(symbol, 0) ?: return@analyze null
-                if (spec.operation.kind != DiKind.LOOKUP) return@analyze null
-                val type = unwrapBeanType(resolved.signature.returnType, spec.operation) ?: return@analyze null
-                val primary = classKey(type) ?: return@analyze null
-                DiCall(DiKind.LOOKUP, setOf(primary), spec.qualifier.valueOrDynamic(expression), displayName(type))
-            }
-            else -> null
         }
     }
 
-    private data class Spec(val operation: DiOperation, val qualifier: QualifierSource, val boundTypes: Set<String> = emptySet())
+    private data class Spec(
+        val operation: DiOperation,
+        val qualifier: QualifierSource,
+        val boundTypes: Set<String> = emptySet(),
+        // A pointer, not a session-bound KaType, crosses nested source-analysis sessions.
+        val beanType: KaTypePointer<KaType>? = null,
+    )
     private sealed interface QualifierSource {
         data object Random : QualifierSource
         data class Fixed(val value: DiQualifier) : QualifierSource
@@ -66,18 +75,14 @@ internal class DiResolver(private val recordDependency: (PsiElement) -> Unit = {
     private fun KaSession.specFor(symbol: KaCallableSymbol, depth: Int): Spec? {
         if (depth > 6) return null
         ProgressManager.checkCanceled()
-        val id = symbol.callableId
-        if (id != null) {
-            DiOperations.resolve(id.packageName.asString(), id.className?.asString(), id.callableName.asString())?.let { operation ->
-                val qualifier = when {
-                    operation.all -> QualifierSource.Fixed(DiQualifier.Any)
-                    operation.random -> QualifierSource.Random
-                    operation.kind == DiKind.LOOKUP && (symbol as? KaFunctionSymbol)?.valueParameters?.any { it.name.asString() == "definition" } == true ->
-                        QualifierSource.DefinitionParameter("definition")
-                    else -> QualifierSource.Parameter("qualifier")
-                }
-                return Spec(operation, qualifier)
+        DiOperations.resolve(symbol)?.let { operation ->
+            val qualifier = when {
+                operation.all -> QualifierSource.Fixed(DiQualifier.Any)
+                operation.random -> QualifierSource.Random
+                operation.definitionParameter != null -> QualifierSource.DefinitionParameter(operation.definitionParameter)
+                else -> QualifierSource.Parameter("qualifier")
             }
+            return Spec(operation, qualifier)
         }
         val source = symbol.psi ?: return null
         // Track ordinary functions/getters too: a body edit can turn a previously rejected call
@@ -89,13 +94,16 @@ internal class DiResolver(private val recordDependency: (PsiElement) -> Unit = {
             else -> null
         } ?: return null
         return analyze(delegate) {
-            val call = delegate.resolveCall() ?: return@analyze null
-            val spec = specFor(call.signature.symbol, depth + 1) ?: return@analyze null
-            val decorations = if (spec.operation.kind == DiKind.DEFINITION) definitionDecorations(delegate, call) else Decorations()
-            // A custom delegate filter must stay opaque through every wrapper in the chain.
-            val operation = if (spec.operation.autoBinds && call.argument("bindFilter") != null)
-                spec.operation.copy(autoBinds = false) else spec.operation
-            Spec(operation, decorations.qualifier ?: instantiate(spec.qualifier, call), spec.boundTypes + decorations.types)
+            with(contextOf<KaSession>()) {
+                val call = delegate.resolveCall() ?: return@analyze null
+                val spec = specFor(call.signature.symbol, depth + 1) ?: return@analyze null
+                val type = beanType(call, spec) ?: return@analyze null
+                val decorations = if (spec.operation.kind == DiKind.DEFINITION) definitionDecorations(delegate, call) else Decorations()
+                // A custom delegate filter must stay opaque through every wrapper in the chain.
+                val operation = if (spec.operation.supertypeBindingFilter?.let { call.argument(it) != null } == true)
+                    spec.operation.copy(supertypeBindingFilter = null) else spec.operation
+                Spec(operation, decorations.qualifier ?: instantiate(spec.qualifier, call), spec.boundTypes + decorations.types, type.createPointer())
+            }
         }
     }
 
@@ -123,11 +131,30 @@ internal class DiResolver(private val recordDependency: (PsiElement) -> Unit = {
         return parameter?.takeUnless { it.containingKtFile.isCompiled }?.defaultValue
     }
 
-    private fun KaSession.beanType(call: KaFunctionCall<*>, operation: DiOperation): KaType? {
-        // WithBinds deliberately returns KoinDefinition<*>. The inferred substitution retains T.
+    private fun KaSession.beanType(call: KaSimpleCall<*, *>, spec: Spec): KaType? {
+        spec.beanType?.let { pointer ->
+            val type = pointer.restore() ?: return null
+            val substitutions = linkedMapOf<KaTypeParameterSymbol, KaType>()
+            // Method type arguments omit parameters of the containing class. Include the
+            // dispatch receiver's supertypes and outer qualifiers for inherited/inner members.
+            call.dispatchReceiver?.type?.let { receiver ->
+                for (receiverType in sequenceOf(receiver) + receiver.allSupertypes) {
+                    for (qualifier in classType(receiverType)?.qualifiers.orEmpty()) {
+                        val parameters = (qualifier.symbol as? KaNamedClassSymbol)?.typeParameters.orEmpty()
+                        parameters.zip(qualifier.typeArguments).forEach { (parameter, argument) ->
+                            (argument as? KaTypeArgumentWithVariance)?.type?.let { substitutions[parameter] = it }
+                        }
+                    }
+                }
+            }
+            substitutions.putAll(call.typeArgumentsMapping)
+            return createSubstitutor(substitutions).substitute(type)
+        }
+        val operation = spec.operation
         if (operation.kind == DiKind.DEFINITION) {
             unwrapBeanType(call.signature.returnType, operation)?.let { return it }
-            return call.typeArgumentsMapping.entries.firstOrNull { it.key.name.asString() in setOf("T", "R") }?.value
+            val parameter = operation.beanTypeParameter?.let { call.signature.symbol.typeParameters.getOrNull(it) }
+            return parameter?.let { call.typeArgumentsMapping[it] }
         }
         return unwrapBeanType(call.signature.returnType, operation)
     }
@@ -253,7 +280,7 @@ internal class DiResolver(private val recordDependency: (PsiElement) -> Unit = {
         if (property != null && !property.isVar) {
             recordDependency(property)
             property.initializer?.let { initializer ->
-                val nested = analyze(initializer) { qualifier(initializer, depth + 1) }
+                val nested = analyze(initializer) { contextOf<KaSession>().qualifier(initializer, depth + 1) }
                 if (nested is QualifierSource.Fixed && nested.value !is DiQualifier.Dynamic) return nested
             }
             return QualifierSource.Fixed(DiQualifier.Dynamic(property.identity()))
@@ -267,7 +294,7 @@ internal class DiResolver(private val recordDependency: (PsiElement) -> Unit = {
         val symbol = expression.unwrapReference()?.resolveCall()?.signature?.symbol
         val initializer = (symbol?.psi as? KtProperty)?.initializer ?: return null
         recordDependency(initializer)
-        return analyze(initializer) { definitionQualifier(initializer, depth + 1) }
+        return analyze(initializer) { contextOf<KaSession>().definitionQualifier(initializer, depth + 1) }
     }
 
     private fun KtExpression.unwrapReference(): KtNameReferenceExpression? = when (this) {

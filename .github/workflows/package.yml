@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 
-# Do not cancel a run between uploading the ZIP and moving its version tag.
+# Finish each create-only publication before starting another release run.
 concurrency:
   group: plugin-release-main
   cancel-in-progress: false
@@ -36,6 +36,9 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: gradle
+
+      - name: Check release publication safeguards
+        run: python3 -m unittest discover -s .github/scripts -p 'test_publish_release.py'
 
       - name: Test, verify and build the plugin ZIP
         run: >-
@@ -81,7 +84,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create or replace the version release
+      - name: Publish the version once
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLUGIN_VERSION: ${{ steps.package.outputs.version }}
@@ -90,56 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           git check-ref-format "refs/tags/$RELEASE_TAG"
-          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
-          if [[ "$current_sha" != "$GITHUB_SHA" ]]; then
-            echo '::notice::Skipping release: this commit is no longer the head of main.'
-            exit 0
-          fi
-
-          find_release() {
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-              jq -c --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag)'
-          }
-          release=$(find_release)
-          if [[ -n "$release" ]] && [[ $(jq -r '.immutable' <<< "$release") == true ]]; then
-            echo '::error::This release is immutable; GitHub does not allow replacing its tag or ZIP.'
-            exit 1
-          fi
-
-          notes="$RUNNER_TEMP/plugin-release-notes.md"
-          printf 'Built from commit %s on main.\n\nBuild: %s/%s/actions/runs/%s\n' \
-            "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$notes"
-          if [[ -z "$release" ]]; then
-            # Use the creation response: the release list can lag behind a newly created draft.
-            release=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-              -f tag_name="$RELEASE_TAG" -f target_commitish="$GITHUB_SHA" \
-              -f name="Koin DI Navigation $PLUGIN_VERSION" -F draft=true -F body=@"$notes")
-          fi
-          release_id=$(jq -er '.id' <<< "$release")
-
-          # Upload first under a unique name so a failed upload preserves the previous ZIP.
-          asset_name=$(basename "$ZIP_PATH")
-          staged_name="$asset_name.upload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          staged_path="$RUNNER_TEMP/$staged_name"
-          cp -- "$ZIP_PATH" "$staged_path"
-          gh release upload "$RELEASE_TAG" "$staged_path" --clobber
-          assets=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq -s 'add')
-          staged_id=$(jq -er --arg name "$staged_name" --argjson size "$(stat -c %s "$ZIP_PATH")" \
-            '.[] | select(.name == $name and .state == "uploaded" and .size == $size) | .id' <<< "$assets")
-          old_id=$(jq -r --arg name "$asset_name" '.[] | select(.name == $name) | .id' <<< "$assets")
-          if [[ -n "$old_id" ]]; then
-            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old_id"
-          fi
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$staged_id" \
-            -f name="$asset_name" --silent
-
-          # --target alone does not move an existing tag. Update this version's tag explicitly.
-          gh auth setup-git
-          git push --force origin "$GITHUB_SHA:refs/tags/$RELEASE_TAG"
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest \
-            --target "$GITHUB_SHA" --title "Koin DI Navigation $PLUGIN_VERSION" --notes-file "$notes"
-          printf 'Published [%s](%s/%s/releases/tag/%s).\n' \
-            "$asset_name" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/publish_release.py
 
       - name: Upload verification reports on failure
         if: failure()
