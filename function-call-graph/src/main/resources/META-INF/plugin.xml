@@ -1,0 +1,28 @@
+<idea-plugin>
+    <id>dev.inmo.idea.function.call.graph</id>
+    <name>Function Call Graph</name>
+    <vendor>InMo</vendor>
+    <description><![CDATA[
+        Interactive call diagrams for Java and Kotlin. Explore callers, outgoing calls,
+        and exact source locations, with adjustable depth and navigation to code.
+    ]]></description>
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+    <depends>org.jetbrains.kotlin</depends>
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK1="false" supportsK2="true"/>
+    </extensions>
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Function Call Graph" anchor="bottom"
+                    factoryClass="dev.inmo.idea.function.call.graph.ui.CallGraphToolWindowFactory"/>
+    </extensions>
+    <actions>
+        <action id="dev.inmo.idea.function.call.graph.show"
+                class="dev.inmo.idea.function.call.graph.ShowCallGraphAction"
+                text="Show Function Call Graph"
+                description="Show callers and outgoing calls for the function at the caret">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

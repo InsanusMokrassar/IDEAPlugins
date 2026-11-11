@@ -1,0 +1,110 @@
+name: Package plugin
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Finish each create-only publication before starting another release run.
+concurrency:
+  group: plugin-release-main
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the triggering commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17 and 25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            25
+          cache: gradle
+
+      - name: Check release publication safeguards
+        run: python3 -m unittest discover -s .github/scripts -p 'test_publish_release.py'
+
+      - name: Test, verify and build all plugin ZIPs
+        run: >-
+          ./build-plugins.sh --no-daemon --max-workers=2
+          '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8'
+          check
+
+      - name: Read the packaged plugin version
+        id: package
+        run: |
+          python3 - <<'PY'
+          import io
+          import os
+          import re
+          import xml.etree.ElementTree as ET
+          import zipfile
+          from pathlib import Path
+
+          archives = list(Path('koin-dependency-navigation/build/distributions').glob('*.zip'))
+          if len(archives) != 1:
+              raise SystemExit(f'Expected one plugin ZIP, found {len(archives)}')
+          path = archives[0]
+          versions = []
+          with zipfile.ZipFile(path) as archive:
+              for name in archive.namelist():
+                  if name.endswith('.jar'):
+                      with zipfile.ZipFile(io.BytesIO(archive.read(name))) as jar:
+                          if 'META-INF/plugin.xml' in jar.namelist():
+                              plugin = ET.fromstring(jar.read('META-INF/plugin.xml'))
+                              if plugin.findtext('id') == 'dev.inmo.idea.koin.dependency.navigation':
+                                  versions.append(plugin.findtext('version', ''))
+          if len(versions) != 1 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._+-]+)?', versions[0]):
+              raise SystemExit(f'Expected one valid plugin version, found {versions!r}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'version={versions[0]}\ntag=v{versions[0]}\nzip={path.as_posix()}\n')
+          PY
+
+      - name: Keep all three installable ZIPs as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugins-${{ github.run_id }}-${{ github.run_attempt }}
+          path: local.dists/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish the version once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLUGIN_VERSION: ${{ steps.package.outputs.version }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          ZIP_PATH: ${{ steps.package.outputs.zip }}
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          python3 .github/scripts/publish_release.py
+
+      - name: Upload verification reports on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            **/build/reports/tests/test/
+            **/build/test-results/test/*.xml
+            **/build/reports/pluginVerifier/
+          if-no-files-found: ignore
+          retention-days: 7
