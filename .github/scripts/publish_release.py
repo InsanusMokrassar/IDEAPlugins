@@ -23,7 +23,7 @@ def api(endpoint, method="GET", payload=None, *, paginate=False):
 
 
 def conflict(message):
-    raise RuntimeError(f"{message} Bump the plugin version before publishing different content.")
+    raise RuntimeError(f"{message} Bump bundleVersion in gradle.properties before publishing different content.")
 
 
 def tag_commit(base, tag):
@@ -108,8 +108,10 @@ def main():
     if release is None:
         release = api(f"{base}/releases", "POST", {
             "tag_name": tag, "target_commitish": commit,
-            "name": f"Koin Dependency Navigation {os.environ['PLUGIN_VERSION']}", "draft": True,
-            "body": f"Built from commit {commit} on main.\n\n"
+            "name": f"{repository.rsplit('/', 1)[-1]} {os.environ['BUNDLE_VERSION']}", "draft": True,
+            "body": "Extract the three plugin ZIPs from this bundle and install each separately "
+                    "using Install Plugin from Disk.\n\n"
+                    f"Built from commit {commit} on main.\n\n"
                     f"Build: {server}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}\n",
         })
     if not has_asset:

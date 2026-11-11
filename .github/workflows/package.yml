@@ -1,4 +1,4 @@
-name: Package plugin
+name: Package IDEAPlugins
 
 on:
   push:
@@ -39,8 +39,8 @@ jobs:
             25
           cache: gradle
 
-      - name: Check release publication safeguards
-        run: python3 -m unittest discover -s .github/scripts -p 'test_publish_release.py'
+      - name: Check bundle packaging and publication safeguards
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Test, verify and build all plugin ZIPs
         run: >-
@@ -48,48 +48,26 @@ jobs:
           '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8'
           check
 
-      - name: Read the packaged plugin version
+      - name: Package all three plugins into one repository-named ZIP
         id: package
-        run: |
-          python3 - <<'PY'
-          import io
-          import os
-          import re
-          import xml.etree.ElementTree as ET
-          import zipfile
-          from pathlib import Path
+        run: python3 .github/scripts/package_plugins.py
 
-          archives = list(Path('koin-dependency-navigation/build/distributions').glob('*.zip'))
-          if len(archives) != 1:
-              raise SystemExit(f'Expected one plugin ZIP, found {len(archives)}')
-          path = archives[0]
-          versions = []
-          with zipfile.ZipFile(path) as archive:
-              for name in archive.namelist():
-                  if name.endswith('.jar'):
-                      with zipfile.ZipFile(io.BytesIO(archive.read(name))) as jar:
-                          if 'META-INF/plugin.xml' in jar.namelist():
-                              plugin = ET.fromstring(jar.read('META-INF/plugin.xml'))
-                              if plugin.findtext('id') == 'dev.inmo.idea.koin.dependency.navigation':
-                                  versions.append(plugin.findtext('version', ''))
-          if len(versions) != 1 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._+-]+)?', versions[0]):
-              raise SystemExit(f'Expected one valid plugin version, found {versions!r}')
-          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write(f'version={versions[0]}\ntag=v{versions[0]}\nzip={path.as_posix()}\n')
-          PY
-
-      - name: Keep all three installable ZIPs as a workflow artifact
+      - name: Keep the bundle ZIP as a workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: plugins-${{ github.run_id }}-${{ github.run_attempt }}
-          path: local.dists/*.zip
+          # overwrite uses this name even when archive: false derives it from the file.
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.zip }}
+          archive: false
+          # A retry replaces only this run's artifact; release assets remain immutable.
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish the version once
+      - name: Publish the bundle version once
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PLUGIN_VERSION: ${{ steps.package.outputs.version }}
+          BUNDLE_VERSION: ${{ steps.package.outputs.version }}
           RELEASE_TAG: ${{ steps.package.outputs.tag }}
           ZIP_PATH: ${{ steps.package.outputs.zip }}
         run: |

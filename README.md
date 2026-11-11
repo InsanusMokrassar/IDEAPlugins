@@ -1,4 +1,4 @@
-# InMo IDEA Plugins
+# IDEAPlugins
 
 Три плагина для **IntelliJ IDEA 2026.3 (263.7307.200)** в одном Gradle-проекте.
 У каждого плагина свой идентификатор, версия и установочный ZIP.
@@ -69,7 +69,8 @@ JAVA_HOME="$IDEA_PATH/jbr" ./build-plugins.sh -PlocalIdePath="$IDEA_PATH"
 
 ## Общая конфигурация
 
-- `gradle.properties` — версия IDEA, диапазон совместимости `263.7307–263.*` и JDK 25 для плагинов.
+- `gradle.properties` — версия IDEA, диапазон совместимости `263.7307–263.*`, JDK 25
+  для плагинов и независимая версия общего архива `bundleVersion`.
 - `gradle/libs.versions.toml` — версии Kotlin, IntelliJ Platform Gradle Plugin и библиотек.
 - `build.gradle.kts` — общие репозитории, SDK, toolchain, тесты, Plugin Verifier и сбор ZIP.
 - `settings.gradle.kts` — состав модулей.
@@ -82,20 +83,36 @@ JDK 17; Kotlin compiler остаётся `compileOnly` для анализато
 
 ## GitHub Actions и публикация
 
-Workflow **Package plugin** выполняет общие проверки и сохраняет все три ZIP в Actions artifact
-`plugins-<run>-<attempt>` на 14 дней. При ошибке отчёты всех модулей сохраняются на 7 дней.
-Существующая публикация GitHub Release относится к Koin Dependency Navigation; версия читается из
-его собранного дескриптора. ZIP остальных плагинов доступны в общем Actions artifact.
+Workflow **Package IDEAPlugins** выполняет общие проверки и собирает единый
+`IDEAPlugins-1.0.0.zip` с тремя установочными ZIP плагинов внутри. Имя архива и GitHub Release
+берётся из текущего имени репозитория через `GITHUB_REPOSITORY`, а версия — из
+`bundleVersion` в корневом `gradle.properties`. Версии отдельных плагинов независимы.
+
+Один и тот же архив публикуется в GitHub Release **IDEAPlugins 1.0.0** с тегом
+`IDEAPlugins-v1.0.0` и сохраняется как Actions artifact на 14 дней, без дополнительной ZIP-обёртки.
+При ошибке отчёты всех модулей сохраняются на 7 дней. Для установки распакуйте общий архив,
+затем установите каждый из трёх ZIP через **Install Plugin from Disk**.
+
+Локально после `./build-plugins.sh` общий архив можно получить той же командой, что в CI:
+
+```bash
+GITHUB_REPOSITORY=InsanusMokrassar/IDEAPlugins python3 .github/scripts/package_plugins.py
+```
+
+Результат: `build/distributions/IDEAPlugins-1.0.0.zip`. В `local.dists` остаются только
+три отдельных ZIP. Упаковка проверяет состав по plugin ID, сохраняет исходные ZIP без изменений
+и использует фиксированные метаданные, чтобы повторная упаковка давала тот же SHA-256.
 
 Теги и опубликованные ZIP не заменяются. Повторный запуск того же коммита проверяет SHA-256
-существующего архива; иной коммит или содержимое требуют новой версии Koin перед публикацией.
+существующего архива; иной коммит или содержимое требуют новой `bundleVersion` перед публикацией.
+Прежние теги и релизы Koin с именами `v…` остаются без изменений.
 Незавершённый draft можно завершить только при совпадающем теге и отсутствии конфликта assets.
 Публикации выполняются последовательно; устаревший коммит не публикуется поверх нового `main`.
 
 Проверки публикации без сети:
 
 ```bash
-python3 -m unittest discover -s .github/scripts -p 'test_publish_release.py'
+python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 ```
 
 Gradle Wrapper проверяет SHA-256 дистрибутива. Подробности работы и ограничения каждого плагина

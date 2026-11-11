@@ -4,7 +4,7 @@
 
 ## Установка и работа
 
-1. Скачайте ZIP из [GitHub Releases](https://github.com/InsanusMokrassar/IDEAPlugins/releases/latest) или соберите `koin-dependency-navigation/build/distributions/koin-dependency-navigation-1.0.4.zip` командой ниже.
+1. Скачайте общий архив из [GitHub Releases](https://github.com/InsanusMokrassar/IDEAPlugins/releases/latest) и извлеките из него `koin-dependency-navigation-1.0.4.zip` или соберите этот ZIP командой ниже.
 2. В IDEA откройте **Settings → Plugins → ⚙ → Install Plugin from Disk**, выберите ZIP и перезапустите IDE.
 3. Откройте Kotlin-проект, выполните Gradle Sync и дождитесь индексации IDEA, затем фоновой задачи **Indexing Koin DI navigation**. Значки появятся после подготовки кэша.
 4. Синий значок слева от `single` / `factory` ведёт к получениям зависимости. Зелёный значок слева от `get` / `getOrNull` ведёт к регистрациям. Один результат открывается сразу; несколько — в списке с именем файла и строкой. При отсутствии результата появляется подсказка.
